@@ -1,12 +1,28 @@
 @echo off
+setlocal enabledelayedexpansion
 chcp 65001 >nul
 title TrollVNC - Kết nối điều khiển iOS từ xa
 
 :MENU
 cls
+
+:: Load config nếu có
+set "CFG=%~dp0TrollVNC-Connect.cfg"
+set "SAVED_HOST="
+set "SAVED_PORT="
+if exist "!CFG!" (
+    for /f "tokens=1,2 delims==" %%a in ('type "!CFG!"') do (
+        if "%%a"=="HOST" set "SAVED_HOST=%%b"
+        if "%%a"=="PORT" set "SAVED_PORT=%%b"
+    )
+)
+
 echo ============================================================
 echo   TrollVNC - Kết nối điều khiển iOS từ xa
 echo ============================================================
+if defined SAVED_HOST (
+    echo   [Đã lưu] !SAVED_HOST!:!SAVED_PORT! -- nhấn Enter để kết nối nhanh
+)
 echo.
 echo  [1] Kết nối VNC thông thường (LAN)
 echo  [2] Kết nối qua trình duyệt (noVNC / HTTP)
@@ -17,12 +33,21 @@ echo  [6] Thoát
 echo.
 set /p CHOICE=Chọn [1-6]: 
 
-if "%CHOICE%"=="1" goto CONNECT_VNC
-if "%CHOICE%"=="2" goto CONNECT_WEB
-if "%CHOICE%"=="3" goto REVERSE_VNC
-if "%CHOICE%"=="4" goto INSTALL_VIEWER
-if "%CHOICE%"=="5" goto HELP
-if "%CHOICE%"=="6" goto EXIT
+:: Nhấn Enter = kết nối nhanh với host đã lưu
+if "!CHOICE!"=="" (
+    if defined SAVED_HOST (
+        set "VNC_HOST=!SAVED_HOST!"
+        set "VNC_PORT=!SAVED_PORT!"
+        goto LAUNCH_VIEWER
+    )
+)
+
+if "!CHOICE!"=="1" goto CONNECT_VNC
+if "!CHOICE!"=="2" goto CONNECT_WEB
+if "!CHOICE!"=="3" goto REVERSE_VNC
+if "!CHOICE!"=="4" goto INSTALL_VIEWER
+if "!CHOICE!"=="5" goto HELP
+if "!CHOICE!"=="6" goto EXIT
 goto MENU
 
 :: ============================================================
@@ -32,15 +57,108 @@ echo ============================================================
 echo   Kết nối VNC thông thường
 echo ============================================================
 echo.
+echo [*] Đang quét thiết bị trong mạng LAN...
+echo     (Có thể mất 10-20 giây)
+echo.
+
+:: Lấy tất cả IP, ưu tiên WiFi/Ethernet thật (loại bỏ VMware/VirtualBox/loopback)
+set "LOCAL_IP="
+set "SUBNET="
+
+for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /i "IPv4"') do (
+    set "TMP_IP=%%a"
+    set "TMP_IP=!TMP_IP: =!"
+    :: Bỏ qua loopback và VMware (thường 192.168.112.x, 192.168.56.x, 172.x)
+    echo !TMP_IP! | findstr /r "^192\.168\.112\. ^192\.168\.56\. ^172\. ^127\." >nul 2>&1
+    if !errorlevel! neq 0 (
+        if "!LOCAL_IP!"=="" set "LOCAL_IP=!TMP_IP!"
+    )
+)
+
+:: Fallback: lấy IP đầu tiên nếu không tìm được
+if "!LOCAL_IP!"=="" (
+    for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /i "IPv4" ^| findstr /v "127.0.0.1"') do (
+        if "!LOCAL_IP!"=="" (
+            set "LOCAL_IP=%%a"
+            set "LOCAL_IP=!LOCAL_IP: =!"
+        )
+    )
+)
+
+for /f "tokens=1-3 delims=." %%a in ("!LOCAL_IP!") do set "SUBNET=%%a.%%b.%%c"
+
+if "!SUBNET!"=="" (
+    echo [!] Không xác định được subnet. Nhập IP thủ công.
+    goto MANUAL_IP
+)
+
+echo [*] IP máy tính: !LOCAL_IP!
+echo [*] Subnet: !SUBNET!.0/24
+echo.
+
+:: Quét ARP cache (nhanh, không cần ping từng IP)
+set COUNT=0
+echo     Thiết bị tìm thấy trong mạng:
+echo     --------------------------------
+for /f "tokens=1" %%i in ('arp -a ^| findstr /r " [0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]* "') do (
+    echo %%i | findstr /r "^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul 2>&1
+    if !errorlevel!==0 (
+        echo %%i | findstr "^!SUBNET!" >nul 2>&1
+        if !errorlevel!==0 (
+            echo %%i | findstr "\.255$" >nul 2>&1
+            if !errorlevel! neq 0 (
+                set /a COUNT+=1
+                set "IP_!COUNT!=%%i"
+                echo     [!COUNT!] %%i
+            )
+        )
+    )
+)
+
+if !COUNT!==0 (
+    echo [!] Không tìm thấy thiết bị nào trong ARP cache.
+    echo     Hãy đảm bảo iPhone đang kết nối cùng WiFi với máy tính.
+    echo.
+    goto MANUAL_IP
+)
+
+echo     --------------------------------
+echo     [0] Nhập IP thủ công
+echo.
+
+if !COUNT!==0 goto MANUAL_IP
+
+set /p SCAN_CHOICE=Chọn thiết bị [0-!COUNT!]: 
+
+if "!SCAN_CHOICE!"=="0" goto MANUAL_IP
+if "!SCAN_CHOICE!"=="" goto MANUAL_IP
+
+:: Validate lựa chọn
+set "VNC_HOST=!IP_%SCAN_CHOICE%!"
+if "!VNC_HOST!"=="" (
+    echo [!] Lựa chọn không hợp lệ.
+    pause
+    goto CONNECT_VNC
+)
+echo.
+echo [*] Đã chọn: !VNC_HOST!
+goto ASK_PORT
+
+:MANUAL_IP
 set /p VNC_HOST=Nhập địa chỉ IP của thiết bị iOS (vd: 192.168.1.100): 
-if "%VNC_HOST%"=="" (
+if "!VNC_HOST!"=="" (
     echo [!] Địa chỉ IP không được để trống.
     pause
     goto CONNECT_VNC
 )
 
-set /p VNC_PORT=Nhập cổng VNC (mặc định 5901, Enter để dùng mặc định): 
-if "%VNC_PORT%"=="" set VNC_PORT=5901
+:ASK_PORT
+:: Gợi ý port từ config đã lưu
+set "DEFAULT_PORT=5901"
+if defined SAVED_PORT set "DEFAULT_PORT=!SAVED_PORT!"
+
+set /p VNC_PORT=Nhập cổng VNC (mặc định !DEFAULT_PORT!, Enter để dùng mặc định): 
+if "!VNC_PORT!"=="" set "VNC_PORT=!DEFAULT_PORT!"
 
 echo.
 echo  Preset kết nối:
@@ -57,8 +175,13 @@ if "%PRESET%"=="3" set PRESET_NAME=Thiết bị cũ
 if "%PRESET%"=="4" set PRESET_NAME=Tùy chỉnh
 
 echo.
-echo [*] Đang kết nối tới %VNC_HOST%:%VNC_PORT% (Preset: %PRESET_NAME%)...
+echo [*] Đang kết nối tới !VNC_HOST!:!VNC_PORT! (Preset: !PRESET_NAME!)...
 echo.
+
+:LAUNCH_VIEWER
+:: Lưu config
+echo HOST=!VNC_HOST!> "!CFG!"
+echo PORT=!VNC_PORT!>> "!CFG!"
 
 :: Kiểm tra TightVNC Viewer
 set "TVNC_PATH="
